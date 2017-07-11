@@ -50,6 +50,10 @@ function cvt32_to_128(x) {//uint32x4 uint32_t
 //------------------------------------------------------------------------------
 // 4x4 predictions
 
+function SIMD_DST(dst,dst_off,x, y, z) { dst[dst_off+(x) + (y) * BPS]=z; }
+function SIMD_AVG2(a, b) { return (((a) + (b) + 1) >> 1) }
+function SIMD_AVG3(a, b, c) { return ((((a) + 2 * (b) + (c) + 2) >> 2)) } //(uint8_t)
+
 function VE4(dst,dst_off) {//uint8_t*   // vertical
   var zero = SIMD.Uint8x16.splat(0);
   var two = SIMD.Uint16x8(2, 2, 2, 2, 2, 2, 2, 2);
@@ -118,6 +122,127 @@ function RD4(dst,dst_off) {//uint8_t*   // Down-right
   WebPUint32ToMem(dst,dst_off + 3 * BPS, SIMD.Uint32x4.extractLane(vals3,0));
 }
 
+function VR4(dst,dst_off) {//uint8_t*   // Vertical-Right
+  var I = dst[dst_off-1 + 0 * BPS];//const uint32_t
+  var J = dst[dst_off-1 + 1 * BPS];
+  var K = dst[dst_off-1 + 2 * BPS];
+  var X = dst[dst_off-1 - BPS];
+  var zero = SIMD.Uint8x16.splat(0);
+  var one = SIMD.Uint16x8(1, 1, 1, 1, 1, 1, 1, 1);
+  var two = SIMD.Uint16x8(2, 2, 2, 2, 2, 2, 2, 2);
+  var top = get_8_bytes(dst,dst_off - BPS - 1);//const uint8x16
+  var XABCD = SIMD.Uint8x16.shuffle(
+      top, zero, 0, 16, 1, 16, 2, 16, 3, 16, 4, 16, 16, 16, 16, 16, 16, 16);
+  var ABCD0 = SIMD.Uint8x16.shuffle(
+      top, zero, 1, 16, 2, 16, 3, 16, 4, 16, 16, 16, 16, 16, 16, 16, 16, 16);
+  var abcd = SIMD.Uint8x16.fromUint16x8Bits(SIMD.Uint16x8.shiftRightByScalar(SIMD.Uint16x8.add(SIMD.Uint16x8.fromUint8x16Bits(XABCD), SIMD.Uint16x8.add(SIMD.Uint16x8.fromUint8x16Bits(ABCD0), one)), 1));//const uint16x8 one
+  var IX = SIMD.Uint8x16.fromUint32x4Bits(cvt32_to_128(I | (X << 8)));//const uint16x8 (uint16x8)
+  var IXABCD = SIMD.Uint8x16.shuffle(
+      XABCD, IX, 16, 31, 17, 31, 2, 3, 4, 5, 6, 7, 8, 9, 10,
+      11, 12, 13);
+	  var sum0=SIMD.Uint16x8.add(SIMD.Uint16x8.fromUint8x16Bits(IXABCD), SIMD.Uint16x8.fromUint8x16Bits(XABCD));
+	  var sum1=SIMD.Uint16x8.add(SIMD.Uint16x8.fromUint8x16Bits(XABCD), SIMD.Uint16x8.fromUint8x16Bits(ABCD0));
+	  var sum2=SIMD.Uint16x8.add(sum1, two);
+	  var sum=SIMD.Uint16x8.add(sum0,sum2);
+  var efgh = SIMD.Uint8x16.fromUint16x8Bits(SIMD.Uint16x8.shiftRightByScalar(
+      sum, 2));//const uint16x8 two
+  var vals0 = SIMD.Uint32x4.fromUint8x16Bits(SIMD.Uint8x16.shuffle(
+      abcd, zero, 0, 2, 4, 6, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16,
+      16, 16));
+  var vals1 = SIMD.Uint32x4.fromUint8x16Bits(SIMD.Uint8x16.shuffle(
+      efgh, zero, 0, 2, 4, 6, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16,
+      16, 16));
+  var vals2 = SIMD.Uint32x4.fromUint8x16Bits(SIMD.Uint8x16.shuffle(
+      abcd, zero, 16, 0, 2, 4, 6, 16, 16, 16, 16, 16, 16, 16, 16, 16,
+      16, 16));
+  var vals3 = SIMD.Uint32x4.fromUint8x16Bits(SIMD.Uint8x16.shuffle(
+      efgh, zero, 16, 0, 2, 4, 6, 16, 16, 16, 16, 16, 16, 16, 16, 16,
+      16, 16));
+  WebPUint32ToMem(dst,dst_off + 0 * BPS, SIMD.Uint32x4.extractLane(vals0,0));
+  WebPUint32ToMem(dst,dst_off + 1 * BPS, SIMD.Uint32x4.extractLane(vals1,0));
+  WebPUint32ToMem(dst,dst_off + 2 * BPS, SIMD.Uint32x4.extractLane(vals2,0));
+  WebPUint32ToMem(dst,dst_off + 3 * BPS, SIMD.Uint32x4.extractLane(vals3,0));
+
+  SIMD_DST(dst,dst_off,0, 2, SIMD_AVG3(J, I, X));
+  SIMD_DST(dst,dst_off,0, 3, SIMD_AVG3(K, J, I));
+}
+
+function LD4(dst,dst_off) {//uint8_t*   // Down-Left
+  var zero = SIMD.Uint8x16.splat(0);
+  var two = SIMD.Uint16x8(2, 2, 2, 2, 2, 2, 2, 2);
+  var top = get_8_bytes(dst,dst_off - BPS);//const uint8x16
+  var ABCDEFGH = SIMD.Uint8x16.shuffle(
+      top, zero, 0, 16, 1, 16, 2, 16, 3, 16, 4, 16, 5, 16, 6, 16, 7, 16);
+  var BCDEFGH0 = SIMD.Uint8x16.shuffle(
+      top, zero, 1, 16, 2, 16, 3, 16, 4, 16, 5, 16, 6, 16, 7, 16, 16, 16);
+  var CDEFGHH0 = SIMD.Uint8x16.shuffle(
+      top, zero, 2, 16, 3, 16, 4, 16, 5, 16, 6, 16, 7, 16, 7, 16, 16, 16);
+	  var sum0=SIMD.Uint16x8.add(SIMD.Uint16x8.fromUint8x16Bits(ABCDEFGH), SIMD.Uint16x8.fromUint8x16Bits(BCDEFGH0));
+	  var sum1=SIMD.Uint16x8.add(SIMD.Uint16x8.fromUint8x16Bits(BCDEFGH0), SIMD.Uint16x8.fromUint8x16Bits(CDEFGHH0));
+	  var sum2=SIMD.Uint16x8.add(sum1, two);
+	  var sum=SIMD.Uint16x8.add(sum0,sum2);
+  var avg3 = SIMD.Uint8x16.fromUint16x8Bits(SIMD.Uint16x8.shiftRightByScalar(
+      sum, 2));//const uint16x8 two
+  var vals0 = SIMD.Uint32x4.fromUint8x16Bits(SIMD.Uint8x16.shuffle(
+      avg3, zero, 0, 2, 4, 6, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16,
+      16, 16));
+  var vals1 = SIMD.Uint32x4.fromUint8x16Bits(SIMD.Uint8x16.shuffle(
+      avg3, zero, 2, 4, 6, 8, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16,
+      16, 16));
+  var vals2 = SIMD.Uint32x4.fromUint8x16Bits(SIMD.Uint8x16.shuffle(
+      avg3, zero, 4, 6, 8, 10, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16,
+      16, 16));
+  var vals3 = SIMD.Uint32x4.fromUint8x16Bits(SIMD.Uint8x16.shuffle(
+      avg3, zero, 6, 8, 10, 12, 16, 16, 16, 16, 16, 16, 16, 16, 16,
+      16, 16, 16));
+  WebPUint32ToMem(dst,dst_off + 0 * BPS, SIMD.Uint32x4.extractLane(vals0,0));
+  WebPUint32ToMem(dst,dst_off + 1 * BPS, SIMD.Uint32x4.extractLane(vals1,0));
+  WebPUint32ToMem(dst,dst_off + 2 * BPS, SIMD.Uint32x4.extractLane(vals2,0));
+  WebPUint32ToMem(dst,dst_off + 3 * BPS, SIMD.Uint32x4.extractLane(vals3,0));
+}
+
+function VL4(dst,dst_off) {//uint8_t*   // Vertical-Left
+  var zero = SIMD.Uint8x16.splat(0);
+  var one = SIMD.Uint16x8(1, 1, 1, 1, 1, 1, 1, 1);
+  var two = SIMD.Uint16x8(2, 2, 2, 2, 2, 2, 2, 2);
+  var top = get_8_bytes(dst,dst_off - BPS);//const uint8x16
+  var ABCDEFGH = SIMD.Uint8x16.shuffle(
+      top, zero, 0, 16, 1, 16, 2, 16, 3, 16, 4, 16, 5, 16, 6, 16, 7, 16);
+  var BCDEFGH_ = SIMD.Uint8x16.shuffle(
+      top, zero, 1, 16, 2, 16, 3, 16, 4, 16, 5, 16, 6, 16, 7, 16, 16, 16);
+  var CDEFGH__ = SIMD.Uint8x16.shuffle(
+      top, zero, 2, 16, 3, 16, 4, 16, 5, 16, 6, 16, 7, 16, 16, 16, 16, 16);
+  var avg1 = SIMD.Uint8x16.fromUint16x8Bits(SIMD.Uint16x8.shiftRightByScalar(SIMD.Uint16x8.add(SIMD.Uint16x8.fromUint8x16Bits(ABCDEFGH), SIMD.Uint16x8.add(SIMD.Uint16x8.fromUint8x16Bits(BCDEFGH_), one)), 1));//const uint16x8
+	  var sum0=SIMD.Uint16x8.add(SIMD.Uint16x8.fromUint8x16Bits(ABCDEFGH), SIMD.Uint16x8.fromUint8x16Bits(BCDEFGH_));
+	  var sum1=SIMD.Uint16x8.add(SIMD.Uint16x8.fromUint8x16Bits(BCDEFGH_), SIMD.Uint16x8.fromUint8x16Bits(CDEFGH__));
+	  var sum2=SIMD.Uint16x8.add(sum1, two);
+	  var sum=SIMD.Uint16x8.add(sum0,sum2);
+  var avg3 = SIMD.Uint8x16.fromUint16x8Bits(SIMD.Uint16x8.shiftRightByScalar(
+      sum, 2));//const uint16x8 two
+  var vals0 = SIMD.Uint32x4.fromUint8x16Bits(SIMD.Uint8x16.shuffle(
+      avg1, zero, 0, 2, 4, 6, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16,
+      16, 16));
+  var vals1 = SIMD.Uint32x4.fromUint8x16Bits(SIMD.Uint8x16.shuffle(
+      avg3, zero, 0, 2, 4, 6, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16,
+      16, 16));
+  var vals2 = SIMD.Uint32x4.fromUint8x16Bits(SIMD.Uint8x16.shuffle(
+      avg1, zero, 2, 4, 6, 8, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16,
+      16, 16));
+  var vals3 = SIMD.Uint32x4.fromUint8x16Bits(SIMD.Uint8x16.shuffle(
+      avg3, zero, 2, 4, 6, 8, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16,
+      16, 16));
+  var vals4 = SIMD.Uint32x4.fromUint8x16Bits(SIMD.Uint8x16.shuffle(
+      avg3, zero, 8, 10, 12, 14, 16, 16, 16, 16, 16, 16, 16, 16, 16,
+      16, 16, 16));
+  var extra_out = SIMD.Uint32x4.extractLane(vals4,0);//const uint32_t
+  WebPUint32ToMem(dst,dst_off + 0 * BPS, SIMD.Uint32x4.extractLane(vals0,0));
+  WebPUint32ToMem(dst,dst_off + 1 * BPS, SIMD.Uint32x4.extractLane(vals1,0));
+  WebPUint32ToMem(dst,dst_off + 2 * BPS, SIMD.Uint32x4.extractLane(vals2,0));
+  WebPUint32ToMem(dst,dst_off + 3 * BPS, SIMD.Uint32x4.extractLane(vals3,0));
+
+  SIMD_DST(dst,dst_off,3, 2, (extra_out >> 0) & 0xff);
+  SIMD_DST(dst,dst_off,3, 3, (extra_out >> 8) & 0xff);
+}
 //------------------------------------------------------------------------------
 // Luma 16x16
 
@@ -290,6 +415,9 @@ function DC8uvNoTopLeft(dst,dst_off) {//uint8_t*     // DC with nothing
 function VP8DspInitSIMDJS() {
   VP8PredLuma4[2] = VE4;
   VP8PredLuma4[4] = RD4;
+  VP8PredLuma4[5] = VR4;
+  VP8PredLuma4[6] = LD4;
+  VP8PredLuma4[7] = VL4;
 
   VP8PredLuma16[0] = DC16;
   VP8PredLuma16[2] = VE16;
