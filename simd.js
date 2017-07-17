@@ -34,6 +34,15 @@ function get_8_bytes(dst,dst_off) {//uint8x16 uint8_t*
   return a;
 }
 
+function get_8_bytes_fromInt16bits(dst,dst_off) {//uint8x16 uint8_t* 
+  var i=0;
+  var arr=new Int16Array(16)
+  for(i=0;i<8;++i)
+  arr[i]=dst[dst_off+i];
+  var a=SIMD.Uint8x16.load(arr,0);//uint8x16
+  return a;
+}
+
 function splat_uint8(val) {//uint8x16 uint32_t 
   var a=SIMD.Uint8x16.splat(val);//uint8x16
   return a;
@@ -45,6 +54,254 @@ function cvt32_to_128(x) {//uint32x4 uint32_t
   arr[0]=x;
   var value = SIMD.Uint32x4.load(arr,0);// (uint32x4){0};//uint32x4
   return value;
+}
+
+function _unpacklo_epi8(a, b) {//int16x8 const int8x16 const int8x16 
+  return SIMD.Int16x8.fromInt8x16Bits(SIMD.Int8x16.shuffle(a, b, 0, 16, 1, 17, 2, 18, 3, 19, 4, 20, 5, 21,
+                                 6, 22, 7, 23));
+}
+
+function _unpacklo_epi16(a, b) {//int32x4 const int16x8 const int16x8 
+  return SIMD.Int32x4.fromInt16x8Bits(SIMD.Int16x8.shuffle(a, b, 0, 8, 1, 9, 2, 10, 3, 11));
+}
+
+function _unpackhi_epi16(a, b) {//int32x4 const int16x8 const int16x8 
+  return SIMD.Int32x4.fromInt16x8Bits(SIMD.Int16x8.shuffle(a, b, 4, 12, 5, 13, 6, 14, 7, 15));
+}
+
+function _unpacklo_epi32(a, b) {//int32x4 const int32x4 const int32x4 
+  return SIMD.Int32x4.shuffle(a, b, 0, 4, 1, 5);
+}
+
+function _unpackhi_epi32(a, b) {
+  return SIMD.Int32x4.shuffle(a, b, 2, 6, 3, 7);
+}
+
+function _unpacklo_epi64(a, b) {
+  return SIMD.Int32x4.shuffle(a, b, 0, 1, 4, 5);
+}
+
+function _unpackhi_epi64(a, b) {
+  return SIMD.Int32x4.shuffle(a, b, 2, 3, 6, 7);
+}
+
+function _mulhi_int16x8(in_, k) {//int16x8 int16x8 int32x4 
+  var zero = SIMD.Int16x8(0, 0, 0, 0, 0, 0, 0, 0);
+  var sixteen = SIMD.Int32x4(16, 16, 16, 16);
+  // Put in upper 16 bits so we can preserve the sign
+  var in_lo =
+      SIMD.Int32x4.fromInt16x8Bits(SIMD.Int16x8.shuffle(in_, zero, 8, 0, 8, 1, 8, 2, 8, 3));
+  var in_hi =
+      SIMD.Int32x4.fromInt16x8Bits(SIMD.Int16x8.shuffle(in_, zero, 8, 4, 8, 5, 8, 6, 8, 7));
+  var _lo = SIMD.Int32x4.mul(SIMD.Int32x4.shiftRightByScalar(in_lo, 16), k);//sixteen
+  var _hi = SIMD.Int32x4.mul(SIMD.Int32x4.shiftRightByScalar(in_hi, 16), k);//sixteen
+  // only keep the upper 16 bits
+  var res = SIMD.Int16x8.shuffle(
+      SIMD.Int16x8.fromInt32x4Bits(_lo), SIMD.Int16x8.fromInt32x4Bits(_hi), 1, 3, 5, 7, 9, 11, 13, 15);
+  return res;
+}
+
+function int16x8_to_uint8x16_sat(x) {//uint8x16 int16x8 
+  var k00ff00ff =
+      SIMD.Uint8x16(-1, 0, -1, 0, -1, 0, -1, 0, -1, 0, -1, 0, -1, 0, -1, 0);
+  var fifteen = SIMD.Int16x8(15, 15, 15, 15, 15, 15, 15, 15);
+  var zero = SIMD.Int16x8.splat(0);
+  var one = SIMD.Int16x8.splat(255);
+  var a = SIMD.Int16x8.select(SIMD.Int16x8.greaterThan(x, SIMD.Int16x8.fromUint8x16Bits(k00ff00ff)),one,zero);//
+  var b = SIMD.Int16x8.and(x, SIMD.Int16x8.not(a));
+  var b = SIMD.Int16x8.select(SIMD.Int16x8.lessThan(b, zero),zero,b);
+  var c = SIMD.Int16x8.shiftRightByScalar(SIMD.Int16x8.and(x, a), 15);//fifteen
+  var d = SIMD.Int16x8.and(SIMD.Int16x8.not(c), a);
+  var e = SIMD.Int16x8.or(b, d);
+  var final = SIMD.Uint8x16.shuffle(
+      SIMD.Uint8x16.fromInt16x8Bits(e), SIMD.Uint8x16.fromInt16x8Bits(e), 0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26,
+      28, 30);
+  return final;
+}
+//------------------------------------------------------------------------------
+// Transforms (Paragraph 14.4)
+
+// Transpose two 4x4 16b matrices horizontally stored in registers.
+function VP8Transpose_2_4x4_16b(
+    in0, in1,//const int16x8* const const int16x8* const 
+    in2, in3, out0,//const int16x8* const const int16x8* const int16x8* const 
+    out1, out2, out3) {//int16x8* const int16x8* const int16x8* const 
+  // Transpose the two 4x4.
+  // a00 a01 a02 a03   b00 b01 b02 b03
+  // a10 a11 a12 a13   b10 b11 b12 b13
+  // a20 a21 a22 a23   b20 b21 b22 b23
+  // a30 a31 a32 a33   b30 b31 b32 b33
+  var transpose0_0 = _unpacklo_epi16(in0, in1);//const int32x4
+  var transpose0_1 = _unpacklo_epi16(in2, in3);
+  var transpose0_2 = _unpackhi_epi16(in0, in1);
+  var transpose0_3 = _unpackhi_epi16(in2, in3);
+  // a00 a10 a01 a11   a02 a12 a03 a13
+  // a20 a30 a21 a31   a22 a32 a23 a33
+  // b00 b10 b01 b11   b02 b12 b03 b13
+  // b20 b30 b21 b31   b22 b32 b23 b33
+  var transpose1_0 = _unpacklo_epi32(transpose0_0, transpose0_1);
+  var transpose1_1 = _unpacklo_epi32(transpose0_2, transpose0_3);
+  var transpose1_2 = _unpackhi_epi32(transpose0_0, transpose0_1);
+  var transpose1_3 = _unpackhi_epi32(transpose0_2, transpose0_3);
+  // a00 a10 a20 a30 a01 a11 a21 a31
+  // b00 b10 b20 b30 b01 b11 b21 b31
+  // a02 a12 a22 a32 a03 a13 a23 a33
+  // b02 b12 a22 b32 b03 b13 b23 b33
+  out0[0] = SIMD.Int16x8.fromInt32x4Bits(_unpacklo_epi64(transpose1_0, transpose1_1));
+  out1[0] = SIMD.Int16x8.fromInt32x4Bits(_unpackhi_epi64(transpose1_0, transpose1_1));
+  out2[0] = SIMD.Int16x8.fromInt32x4Bits(_unpacklo_epi64(transpose1_2, transpose1_3));
+  out3[0] = SIMD.Int16x8.fromInt32x4Bits(_unpackhi_epi64(transpose1_2, transpose1_3));
+  // a00 a10 a20 a30   b00 b10 b20 b30
+  // a01 a11 a21 a31   b01 b11 b21 b31
+  // a02 a12 a22 a32   b02 b12 b22 b32
+  // a03 a13 a23 a33   b03 b13 b23 b33
+}
+
+function Transform(in_, in_off, dst, dst_off, do_two) {//const int16_t* uint8_t* 
+  var k1 = SIMD.Int32x4(20091, 20091, 20091, 20091);
+  var k2 = SIMD.Int32x4(35468, 35468, 35468, 35468);
+  var T0=[], T1=[], T2=[], T3=[];//int16x8
+
+  // Load and concatenate the transform coefficients (we'll do two transforms
+  // in parallel). In the case of only one transform, the second half of the
+  // vectors will just contain random value we'll never use nor store.
+  var in0, in1, in2, in3;//int16x8
+  {
+    in0 = SIMD.Int16x8.fromUint8x16Bits(get_8_bytes_fromInt16bits(in_,in_off+ 0));
+    in1 = SIMD.Int16x8.fromUint8x16Bits(get_8_bytes_fromInt16bits(in_,in_off+ 4));
+    in2 = SIMD.Int16x8.fromUint8x16Bits(get_8_bytes_fromInt16bits(in_,in_off+ 8));
+    in3 = SIMD.Int16x8.fromUint8x16Bits(get_8_bytes_fromInt16bits(in_,in_off+ 12));
+    // a00 a10 a20 a30   x x x x
+    // a01 a11 a21 a31   x x x x
+    // a02 a12 a22 a32   x x x x
+    // a03 a13 a23 a33   x x x x
+    if (do_two) {
+      var inB0 = SIMD.Int32x4.fromUint8x16Bits(get_8_bytes_fromInt16bits(in_,in_off+ 16));//const int16x8
+      var inB1 = SIMD.Int32x4.fromUint8x16Bits(get_8_bytes_fromInt16bits(in_,in_off+ 20));
+      var inB2 = SIMD.Int32x4.fromUint8x16Bits(get_8_bytes_fromInt16bits(in_,in_off+ 24));
+      var inB3 = SIMD.Int32x4.fromUint8x16Bits(get_8_bytes_fromInt16bits(in_,in_off+ 28));
+      in0 = SIMD.Int16x8.fromInt32x4Bits(_unpacklo_epi64(SIMD.Int32x4.fromInt16x8Bits(in0), inB0));
+      in1 = SIMD.Int16x8.fromInt32x4Bits(_unpacklo_epi64(SIMD.Int32x4.fromInt16x8Bits(in1), inB1));
+      in2 = SIMD.Int16x8.fromInt32x4Bits(_unpacklo_epi64(SIMD.Int32x4.fromInt16x8Bits(in2), inB2));
+      in3 = SIMD.Int16x8.fromInt32x4Bits(_unpacklo_epi64(SIMD.Int32x4.fromInt16x8Bits(in3), inB3));
+      // a00 a10 a20 a30   b00 b10 b20 b30
+      // a01 a11 a21 a31   b01 b11 b21 b31
+      // a02 a12 a22 a32   b02 b12 b22 b32
+      // a03 a13 a23 a33   b03 b13 b23 b33
+    }
+  }
+
+  // Vertical pass and subsequent transpose.
+  {
+    var a = SIMD.Int16x8.add(in0, in2);//const int16x8
+    var b = SIMD.Int16x8.sub(in0, in2);
+    var c1 = _mulhi_int16x8(in1, k2);
+    var c2 = SIMD.Int16x8.add(_mulhi_int16x8(in3, k1), in3);
+    var c = SIMD.Int16x8.sub(c1, c2);
+    var d1 = SIMD.Int16x8.add(_mulhi_int16x8(in1, k1), in1);
+    var d2 = _mulhi_int16x8(in3, k2);
+    var d = SIMD.Int16x8.add(d1, d2);
+
+    // Second pass.
+    var tmp0 = SIMD.Int16x8.add(a, d);
+    var tmp1 = SIMD.Int16x8.add(b, c);
+    var tmp2 = SIMD.Int16x8.sub(b, c);
+    var tmp3 = SIMD.Int16x8.sub(a, d);
+
+    // Transpose the two 4x4.
+    VP8Transpose_2_4x4_16b(tmp0, tmp1, tmp2, tmp3, T0, T1, T2, T3);
+  }
+
+  // Horizontal pass and subsequent transpose.
+  {
+    var four = SIMD.Int16x8(4, 4, 4, 4, 4, 4, 4, 4);//const int16x8
+    var dc = SIMD.Int16x8.add(T0[0], four);
+    var a = SIMD.Int16x8.add(dc, T2[0]);
+    var b = SIMD.Int16x8.sub(dc, T2[0]);
+    var c1 = _mulhi_int16x8(T1[0], k2);
+    var c2 = SIMD.Int16x8.add(_mulhi_int16x8(T3[0], k1), T3[0]);
+    var c = SIMD.Int16x8.sub(c1, c2);
+    var d1 = SIMD.Int16x8.add(_mulhi_int16x8(T1[0], k1), T1[0]);
+    var d2 = _mulhi_int16x8(T3[0], k2);
+    var d = SIMD.Int16x8.add(d1, d2);
+
+    // Second pass.
+    var tmp0 = SIMD.Int16x8.add(a, d);
+    var tmp1 = SIMD.Int16x8.add(b, c);
+    var tmp2 = SIMD.Int16x8.sub(b, c);
+    var tmp3 = SIMD.Int16x8.sub(a, d);
+    var three = SIMD.Int16x8(3, 3, 3, 3, 3, 3, 3, 3);
+    var shifted0 = SIMD.Int16x8.shiftRightByScalar(tmp0, 3);//three
+    var shifted1 = SIMD.Int16x8.shiftRightByScalar(tmp1, 3);
+    var shifted2 = SIMD.Int16x8.shiftRightByScalar(tmp2, 3);
+    var shifted3 = SIMD.Int16x8.shiftRightByScalar(tmp3, 3);
+
+    // Transpose the two 4x4.
+    VP8Transpose_2_4x4_16b(shifted0, shifted1, shifted2, shifted3, T0, T1,
+                           T2, T3);
+  }
+
+  // Add inverse transform to 'dst' and store.
+  {
+    var zero = SIMD.Int8x16.splat(0);//const int8x16
+    // Load the reference(s).
+    var dst0 = SIMD.Int8x16.splat(0), dst1 = SIMD.Int8x16.splat(0), dst2 = SIMD.Int8x16.splat(0), dst3 = SIMD.Int8x16.splat(0);//int16x8
+    if (do_two) {
+      // Load eight bytes/pixels per line.
+      dst0 = SIMD.Int8x16.fromUint8x16Bits(get_8_bytes(dst,dst_off + 0 * BPS));
+      dst1 = SIMD.Int8x16.fromUint8x16Bits(get_8_bytes(dst,dst_off + 1 * BPS));
+      dst2 = SIMD.Int8x16.fromUint8x16Bits(get_8_bytes(dst,dst_off + 2 * BPS));
+      dst3 = SIMD.Int8x16.fromUint8x16Bits(get_8_bytes(dst,dst_off + 3 * BPS));
+    } else {
+      // Load four bytes/pixels per line.
+	  for(var i=0;i<4;++i) dst0 = SIMD.Int8x16.replaceLane(dst0,i,(dst[dst_off + 0 * BPS +i]));
+      //memcpy(&dst0, (dst + 0 * BPS), 4);
+	  for(var i=0;i<4;++i) dst1 = SIMD.Int8x16.replaceLane(dst1,i,(dst[dst_off + 1 * BPS +i]));
+      //memcpy(&dst1, (dst + 1 * BPS), 4);
+	  for(var i=0;i<4;++i) dst2 = SIMD.Int8x16.replaceLane(dst2,i,(dst[dst_off + 2 * BPS +i]));
+      //memcpy(&dst2, (dst + 2 * BPS), 4);
+	  for(var i=0;i<4;++i) dst3 = SIMD.Int8x16.replaceLane(dst3,i,(dst[dst_off + 3 * BPS +i]));
+      //memcpy(&dst3, (dst + 3 * BPS), 4);
+    }
+    // Convert to 16b.
+    dst0 = _unpacklo_epi8(dst0, zero);
+    dst1 = _unpacklo_epi8(dst1, zero);
+    dst2 = _unpacklo_epi8(dst2, zero);
+    dst3 = _unpacklo_epi8(dst3, zero);
+    // Add the inverse transform(s).
+    dst0 = SIMD.Int16x8.add(dst0, T0[0]);
+    dst1 = SIMD.Int16x8.add(dst1, T1[0]);
+    dst2 = SIMD.Int16x8.add(dst2, T2[0]);
+    dst3 = SIMD.Int16x8.add(dst3, T3[0]);
+    // Unsigned saturate to 8b.
+    dst0 = int16x8_to_uint8x16_sat(dst0);
+    dst1 = int16x8_to_uint8x16_sat(dst1);
+    dst2 = int16x8_to_uint8x16_sat(dst2);
+    dst3 = int16x8_to_uint8x16_sat(dst3);
+    // Store the results.
+    if (do_two) {
+      // Store eight bytes/pixels per line.
+      // TODO: use lanes instead ???
+      for(var i=0;i<8;++i) dst[dst_off + 0 * BPS +i] = SIMD.Uint8x16.extractLane(dst0,i);
+	  //memcpy(dst + 0 * BPS, &dst0, 8);
+      for(var i=0;i<8;++i) dst[dst_off + 1 * BPS +i] = SIMD.Uint8x16.extractLane(dst1,i);
+      //memcpy(dst + 1 * BPS, &dst1, 8);
+      for(var i=0;i<8;++i) dst[dst_off + 2 * BPS +i] = SIMD.Uint8x16.extractLane(dst2,i);
+      //memcpy(dst + 2 * BPS, &dst2, 8);
+      for(var i=0;i<8;++i) dst[dst_off + 3 * BPS +i] = SIMD.Uint8x16.extractLane(dst3,i);
+      //memcpy(dst + 3 * BPS, &dst3, 8);
+    } else {
+      // Store four bytes/pixels per line.
+      for(var i=0;i<4;++i) dst[dst_off + 0 * BPS +i] = SIMD.Uint8x16.extractLane(dst0,i);
+	  //memcpy(dst + 0 * BPS, &dst0, 4);
+      for(var i=0;i<4;++i) dst[dst_off + 1 * BPS +i] = SIMD.Uint8x16.extractLane(dst1,i);
+      //memcpy(dst + 1 * BPS, &dst1, 4);
+      for(var i=0;i<4;++i) dst[dst_off + 2 * BPS +i] = SIMD.Uint8x16.extractLane(dst2,i);
+      //memcpy(dst + 2 * BPS, &dst2, 4);
+      for(var i=0;i<4;++i) dst[dst_off + 3 * BPS +i] = SIMD.Uint8x16.extractLane(dst3,i);
+      //memcpy(dst + 3 * BPS, &dst3, 4);
+    }
+  }
 }
 
 //------------------------------------------------------------------------------
@@ -413,6 +670,8 @@ function DC8uvNoTopLeft(dst,dst_off) {//uint8_t*     // DC with nothing
 // Entry point
 
 function VP8DspInitSIMDJS() {
+  VP8Transform = Transform;
+
   VP8PredLuma4[2] = VE4;
   VP8PredLuma4[4] = RD4;
   VP8PredLuma4[5] = VR4;
