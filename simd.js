@@ -43,6 +43,20 @@ function get_8_bytes_fromInt16bits(dst,dst_off) {//uint8x16 uint8_t*
   return a;
 }
 
+function get_4_bytes(dst,dst_off) {//uint8x16 uint8_t* 
+  var i=0;
+  var arr=new Uint8Array(16)
+  for(i=0;i<4;++i)
+  arr[i]=dst[dst_off+i];
+  var a=SIMD.Uint8x16.load(arr,0);//uint8x16
+  return a;
+}
+
+function splat_int16(val) {//int16x8 int 
+  var a=SIMD.Int16x8.splat(val);//int16x8
+  return a;
+}
+
 function splat_uint8(val) {//uint8x16 uint32_t 
   var a=SIMD.Uint8x16.splat(val);//uint8x16
   return a;
@@ -59,6 +73,11 @@ function cvt32_to_128(x) {//uint32x4 uint32_t
 function _unpacklo_epi8(a, b) {//int16x8 const int8x16 const int8x16 
   return SIMD.Int16x8.fromInt8x16Bits(SIMD.Int8x16.shuffle(a, b, 0, 16, 1, 17, 2, 18, 3, 19, 4, 20, 5, 21,
                                  6, 22, 7, 23));
+}
+
+function _unpackhi_epi8(a, b) {//int16x8 const int8x16 const int8x16 
+  return SIMD.Int16x8.fromInt8x16Bits(SIMD.Int8x16.shuffle(a, b, 8, 24, 9, 25, 10, 26, 11, 27, 12, 28, 13,
+                                 29, 14, 30, 15, 31));
 }
 
 function _unpacklo_epi16(a, b) {//int32x4 const int16x8 const int16x8 
@@ -118,6 +137,7 @@ function int16x8_to_uint8x16_sat(x) {//uint8x16 int16x8
       28, 30);
   return final;
 }
+
 //------------------------------------------------------------------------------
 // Transforms (Paragraph 14.4)
 
@@ -500,6 +520,54 @@ function VL4(dst,dst_off) {//uint8_t*   // Vertical-Left
   SIMD_DST(dst,dst_off,3, 2, (extra_out >> 0) & 0xff);
   SIMD_DST(dst,dst_off,3, 3, (extra_out >> 8) & 0xff);
 }
+
+function TrueMotion(dst, dst_off, size) {//uint8_t* uint32_t 
+  var zero = SIMD.Int8x16.fromUint8x16Bits(SIMD.Uint8x16.splat(0));
+  var top = dst; var top_off = dst_off - BPS;//uint8_t*
+  var y=0;//int
+
+  if (size == 4) {
+    var top_values = get_4_bytes(top,top_off);//const uint8x16
+    var top_base = _unpacklo_epi8(SIMD.Int8x16.fromUint8x16Bits(top_values), zero);//const int16x8 (int16x8)
+    for (y = 0; y < 4; ++y, dst_off += BPS) {
+      var val = dst[dst_off-1] - top[top_off-1];//const int
+      var base = splat_int16(val);//const int16x8
+      var out = SIMD.Uint32x4.fromUint8x16Bits(int16x8_to_uint8x16_sat(SIMD.Int16x8.add(base, top_base)));//const uint32x4 (uint32x4)
+      WebPUint32ToMem(dst, dst_off, SIMD.Uint32x4.extractLane(out,0));
+    }
+  } else if (size == 8) {
+    var top_values = get_8_bytes(top,top_off);//const uint8x16
+    var top_base = _unpacklo_epi8(SIMD.Int8x16.fromUint8x16Bits(top_values), zero);//const int16x8 (int16x8)
+    for (y = 0; y < 8; ++y, dst_off += BPS) {
+      var val = dst[dst_off-1] - top[top_off-1];//const int
+      var base = splat_int16(val);//const int16x8
+      var out = int16x8_to_uint8x16_sat(SIMD.Int16x8.add(base, top_base));//const uint8x16 (uint8x16)
+	  for(var i=0;i<8;++i) dst[dst_off+i]=SIMD.Uint8x16.extractLane(out,i);
+      //memcpy(dst, &out, 8);
+    }
+  } else {
+    var top_values = get_16_bytes(top,top_off);//const uint8x16
+    var top_base_0 = _unpacklo_epi8(SIMD.Int8x16.fromUint8x16Bits(top_values), zero);//const int16x8 (int16x8)
+    var top_base_1 = _unpackhi_epi8(SIMD.Int8x16.fromUint8x16Bits(top_values), zero);//const int16x8 (int16x8)
+    for (y = 0; y < 16; ++y, dst_off += BPS) {
+      var val = dst[dst_off-1] - top[top_off-1];//const int
+      var base = splat_int16(val);//const int16x8
+      var out_0 =
+          int16x8_to_uint8x16_sat(SIMD.Int16x8.add(base, top_base_0));//const uint8x16 (uint8x16)
+      var out_1 =
+          int16x8_to_uint8x16_sat(SIMD.Int16x8.add(base, top_base_1));//const uint8x16 (uint8x16)
+      var out = SIMD.Uint8x16.shuffle(
+          out_0, out_1, 0, 1, 2, 3, 4, 5, 6, 7, 16, 17, 18, 19, 20, 21, 22, 23);
+	  for(var i=0;i<16;++i) dst[dst_off+i]=SIMD.Uint8x16.extractLane(out,i);
+      //memcpy(dst, &out, 16);
+    }
+  }
+}
+
+function TM4(dst,dst_off) { TrueMotion(dst, dst_off, 4); }
+function TM8uv(dst,dst_off) { TrueMotion(dst, dst_off, 8); }
+function TM16(dst,dst_off) { TrueMotion(dst, dst_off, 16); }
+
 //------------------------------------------------------------------------------
 // Luma 16x16
 
@@ -672,6 +740,7 @@ function DC8uvNoTopLeft(dst,dst_off) {//uint8_t*     // DC with nothing
 function VP8DspInitSIMDJS() {
   VP8Transform = Transform;
 
+  VP8PredLuma4[1] = TM4;
   VP8PredLuma4[2] = VE4;
   VP8PredLuma4[4] = RD4;
   VP8PredLuma4[5] = VR4;
@@ -679,6 +748,7 @@ function VP8DspInitSIMDJS() {
   VP8PredLuma4[7] = VL4;
 
   VP8PredLuma16[0] = DC16;
+  VP8PredLuma16[1] = TM16;
   VP8PredLuma16[2] = VE16;
   VP8PredLuma16[3] = HE16;
   VP8PredLuma16[4] = DC16NoTop;
@@ -686,6 +756,7 @@ function VP8DspInitSIMDJS() {
   VP8PredLuma16[6] = DC16NoTopLeft;
 
   VP8PredChroma8[0] = DC8uv;
+  VP8PredChroma8[1] = TM8uv;
   VP8PredChroma8[2] = VE8uv;
   VP8PredChroma8[3] = HE8uv;
   VP8PredChroma8[4] = DC8uvNoTop;
